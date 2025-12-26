@@ -12,6 +12,8 @@
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^5.2.1",
-    "express-rate-limit": "^8.2.1"
+    "express-rate-limit": "^8.2.1",
+    "mqtt": "^5.14.1",
+    "sqlite3": "^5.1.7"
   }
 }

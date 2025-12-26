@@ -13,7 +13,7 @@ export default class LanguageHandler {
     // language is [lang_code]
     getLanguage(language, data) {
         if (!this.availableLanguages.some(lang => lang == language) && language) return {
-            data: data.data, errors: [...data.errors,
+            data: data.data, errors: [...data.errors || [],
             this.getSingleLanguage(language, {
                 en: `Unsupported language (${language}). Supported languages: ${this.availableLanguages}`,
                 fi: `Tukematon kieli (${language}). Tuetut kielet: ${this.availableLanguages}`
@@ -23,7 +23,7 @@ export default class LanguageHandler {
         }
         else return Object.entries(data).reduce((prev, [key, value]) =>
         ({
-            ...prev, [key]: value.length ?
+            ...prev, [key]: Array.isArray(value) ?
                 value.map(v => this.getSingleLanguage(language, v)) :
                 Object.entries(value).reduce((prev, [k, v]) =>
                 ({
@@ -33,11 +33,10 @@ export default class LanguageHandler {
 
     }
     getSingleLanguage(language, data) {
-        console.log(language, data)
         // If language is specified and is in data
         if (language && data[language] && this.availableLanguages.some(lang => lang == language)) return { [language]: data[language] }
         // if no language specified, use default
-        else if (this.defaultLanguage && data[this.defaultLanguage]) return { [this.defaultLanguage]: data[this.defaultLanguage] }
+        else if (language && this.defaultLanguage && data[this.defaultLanguage]) return { [language]: data[this.defaultLanguage] }
         // Otherwise return all
         else return data
     }

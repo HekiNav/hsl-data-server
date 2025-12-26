@@ -2,17 +2,23 @@ import express, { json } from "express"
 import cors from "cors"
 import { rateLimit } from "express-rate-limit"
 import LanguageHandler from "./modules/languageHandler.js"
+import { mqttDataCollector } from "./modules/mqttDataCollector.js"
 
-const PORT = 3002
-const RATE_LIMIT_PERIOD_MINUTES = 5
-const RATE_LIMIT_AMOUNT = 10
+export const PORT = 3002
+export const RATE_LIMIT_PERIOD_MINUTES = 5
+export const RATE_LIMIT_AMOUNT = 10
 
-const languageHandler = new LanguageHandler({
-    availableLanguages: ["en", "fi"]
+
+
+export const languageHandler = new LanguageHandler({
+    availableLanguages: ["en", "fi"],
+    defaultLanguage: "en"
 })
 
 const app = express()
 app.use(cors())
+
+app.use(mqttDataCollector)
 
 const limiter = rateLimit({
     windowMs: RATE_LIMIT_PERIOD_MINUTES * 60 * 1000,
@@ -47,8 +53,27 @@ app.get("/", (req, res) => {
             description: {
                 en: "HSL Data API",
                 fi: "HSL data API"
+            },
+            docs: {
+                en: "/docs"
             }
         }
+    })
+})
+app.get("/docs", (req, res) => {
+    languageHandler.handle(req, res, {
+        data: {
+            description: {
+                en: "HSL Data API Docs",
+                fi: "HSL data API Docs"
+            }
+        },
+        errors: [
+            {
+                fi: "Dokumentaatio tulossa pian",
+                en: "Documentation coming soon"
+            }
+        ]
     })
 })
 

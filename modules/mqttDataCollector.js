@@ -31,12 +31,33 @@ db.run(`
     delay INTEGER,
     stop TEXT,
     occupancy INTEGER,
+    FOREIGN KEY (trip_id) REFERENCES trips(id)
+);`)
+db.run(`
+    CREATE TABLE IF NOT EXISTS traffic_light_priorities (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trip_id TEXT NOT NULL,
+    time TEXT,
+    request BOOLEAN,
     junctionId TEXT,
+    responseAcknowledged BOOLEAN,
+    FOREIGN KEY (trip_id) REFERENCES trips(id)
+);`)
+db.run(`
+    CREATE TABLE IF NOT EXISTS door_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    doorOpened BOOLEAN NOT NULL,
+    trip_id TEXT NOT NULL,
+    stop TEXT,
+    time TEXT,
     FOREIGN KEY (trip_id) REFERENCES trips(id)
 );`)
 
-router.get("/test", (req, res) => {
-
+router.get("/stats/", async (req, res) => {
+    console.time("all stop events")
+    const events = await getAllStopTripEvents()
+    console.timeEnd("all stop events")
+    res.json(events)
 })
 
 const client = mqtt.connect("wss://mqtt.hsl.fi:443")
@@ -58,8 +79,8 @@ async function handleMessage(topic, message) {
         transport_mode, operator_id, vehicle_number,
         route_id, direction_id, headsign,
         start_time, next_stop, geohash_level,
-        geohash, sid] = topic.split("/")
-    const {
+        geohash] = topic.split("/")
+    const messageData = Object.values(JSON.parse(message.toString()))[0], {
         desi,
         dir,
         oper,
@@ -82,22 +103,23 @@ async function handleMessage(topic, message) {
         stop,
         route,
         occu,
+        sid
 
-    } = Object.values(JSON.parse(message.toString()))[0]
+    } = messageData
     switch (event_type) {
-        case "dep":     // Vehicle departs from a stop and leaves the stop radius
+        case "pde":     // Vehicle is ready to depart from a stop
         case "ars":     // Vehicle has arrived to a stop
         case "pas":     // Vehicle passes through a stop without stopping
-        case "doo":     // Doors of the vehicle are opened
-        case "doc":     // Doors of the vehicle are closed
-        case "tlr":     // Vehicle is requesting traffic light priority
-        case "tla":     // Vehicle receives a response to traffic light priority request
         case "da":      // Driver signs in to the vehicle
         case "dout":    // Driver signs out of the vehicle
         case "ba":      // Driver selects the block that the vehicle will run
         case "bout":    // Driver signs out from the selected block (usually from a depot)
         case "vja":     // Vehicle signs in to a service journey (i.e. a single public transport journey from location A to location B, also known as trip)
         case "vjout":   // Vehicle signs off from a service journey, after reaching the final stop
+        case "doo":     // Doors of the vehicle are opened
+        case "doc":     // Doors of the vehicle are closed
+        case "tlr":     // Vehicle is requesting traffic light priority
+        case "tla":     // Vehicle receives a response to traffic light priority request
             const routeGtfsId = `HSL:${route}`
             const directionId = Number(dir) - 1
             const depTime = start && start.split(":").reduce((prev, curr) => +curr + (prev * 60)) * 60
@@ -123,9 +145,23 @@ async function handleMessage(topic, message) {
                     INSERT INTO trips (gtfsId, routeId, vehicleId, operatorId, operatorName, startTime, day, direction) VALUES (?, ?, ?, ?, ?, ?, ?, ?) 
                     `, [tripId, routeGtfsId, vehicle_number, operator_id, operatorName, start, oday, directionId])
 
-                db.run(`
-                    INSERT INTO trip_events (trip_id, time, type, speed, lat, long, delay, stop, occupancy, junctionId) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                `, [tripId, tsi, event_type, spd, lat, long, dl, stop, occu, sid])
+                switch (event_type) {
+                    case "tlr":
+                    case "tla":
+                        db.run(`
+                    INSERT INTO traffic_light_priorities (trip_id, time, request, junctionId, responseAcknowledged) VALUES (?, ?, ?, ?, ?)
+                `, [tripId, tsi, event_type == "tlr", sid, messageData["tlp-decision"] == "ACK"])
+                    case "doo":
+                    case "doc":
+                        db.run(`
+                    INSERT INTO door_events (doorOpened, trip_id, stop, time) VALUES (?, ?, ?, ?)
+                `, [event_type == "doo", tripId, stop, tsi])
+                    default:
+                        db.run(`
+                    INSERT INTO trip_events (trip_id, time, type, speed, lat, long, delay, stop, occupancy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                `, [tripId, tsi, event_type, spd, lat, long, dl, stop, occu])
+                        break
+                }
 
             })
 
@@ -136,14 +172,13 @@ async function handleMessage(topic, message) {
         case "vp":      // Vehicle position
         case "due":     // Vehicle will soon arrive to a stop
         case "wait":    // Vehicle is waiting at a stop
-        case "pde":     // Vehicle is ready to depart from a stop
         case "arr":     // Vehicle arrives inside of a stop radius
+        case "dep":     // Vehicle departs from a stop and leaves the stop radius
         default:
             break
     }
 }
 export async function fuzzyTripId(routeId, direction, date, time) {
-    console.log("fuzzytrip")
     const query = `
 {
   fuzzyTrip(route: "${routeId}", direction: ${direction}, date: "${date}", time: ${time}) {
@@ -185,6 +220,12 @@ export const operatorTable = {
     90: "VR Oy",
     130: "Matkahuolto",
     195: "Siuntio",
+}
+
+function getAllStopTripEvents() {
+    return new Promise((res) => db.all(`
+        SELECT * FROM trip_events WHERE STOP NOT NULL
+        `, (err, rows) => res(rows)))
 }
 
 export const mqttDataCollector = router

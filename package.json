@@ -7,6 +7,9 @@
   "type": "module",
   "main": "index.js",
   "scripts": {
+    "dev": "env $(cat .env) npx nodemon index.js",
+    "start": "echo \"Starting production run\" && pm2 restart ./ecosystem.config.cjs",
+    "stop": "echo \"Stopping production run\" && pm2 stop ./ecosystem.config.cjs",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {

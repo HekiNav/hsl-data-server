@@ -8,6 +8,11 @@ export const PORT = 3002
 export const RATE_LIMIT_PERIOD_MINUTES = 5
 export const RATE_LIMIT_AMOUNT = 10
 
+export const MEASURE_PERFORMANCE = true
+
+if (!process.env.DIGITRANSIT_SUBSCRIPTION_KEY) throw new Error("Mising subscription key from .env")
+export const DIGITRANSIT_SUBSCRIPTION_KEY = process.env.DIGITRANSIT_SUBSCRIPTION_KEY
+console.log(DIGITRANSIT_SUBSCRIPTION_KEY)
 
 
 export const languageHandler = new LanguageHandler({

@@ -44,6 +44,13 @@ db.run(`
     FOREIGN KEY (trip_id) REFERENCES trips(id)
 );`)
 db.run(`
+    CREATE TABLE IF NOT EXISTS stats (
+    type TEXT NOT NULL,
+    id TEXT,
+    count INTEGER NOT NULL,
+    UNIQUE (type, id)
+);`)
+db.run(`
     CREATE TABLE IF NOT EXISTS door_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     doorOpened BOOLEAN NOT NULL,
@@ -57,6 +64,12 @@ router.get("/stats/", async (req, res) => {
     console.time("all stop events")
     const events = await getAllStopTripEvents()
     console.timeEnd("all stop events")
+    res.json(events)
+})
+router.get("/tl_events/", async (req, res) => {
+    console.time("all tl events")
+    const events = await getAllFromTable("traffic_light_priorities")
+    console.timeEnd("all tl events")
     res.json(events)
 })
 
@@ -106,10 +119,12 @@ async function handleMessage(topic, message) {
         sid
 
     } = messageData
+    //incrementStats("event", event_type)
     switch (event_type) {
-        case "pde":     // Vehicle is ready to depart from a stop
         case "ars":     // Vehicle has arrived to a stop
         case "pas":     // Vehicle passes through a stop without stopping
+            if (stop) incrementStats("stop", `${stop}/${event_type == "ars" ? "stop" : "pass"}`)
+        case "pde":     // Vehicle is ready to depart from a stop
         case "da":      // Driver signs in to the vehicle
         case "dout":    // Driver signs out of the vehicle
         case "ba":      // Driver selects the block that the vehicle will run
@@ -178,6 +193,14 @@ async function handleMessage(topic, message) {
             break
     }
 }
+function incrementStats(type, id) {
+    db.run(`
+INSERT INTO stats (type, id, count)
+VALUES (?, ?, 1)
+ON CONFLICT(type, id)
+DO UPDATE SET count = count + 1;
+;`, [type, id])
+}
 export async function fuzzyTripId(routeId, direction, date, time) {
     const query = `
 {
@@ -225,6 +248,11 @@ export const operatorTable = {
 function getAllStopTripEvents() {
     return new Promise((res) => db.all(`
         SELECT * FROM trip_events WHERE STOP NOT NULL
+        `, (err, rows) => res(rows)))
+}
+function getAllFromTable(table_name) {
+    return new Promise((res) => db.all(`
+        SELECT * FROM ${table_name}
         `, (err, rows) => res(rows)))
 }
 

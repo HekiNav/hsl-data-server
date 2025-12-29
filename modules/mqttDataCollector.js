@@ -1,14 +1,28 @@
 import express from "express";
 import { DIGITRANSIT_SUBSCRIPTION_KEY, languageHandler, MEASURE_PERFORMANCE } from "../index.js";
 import sqlite3 from "sqlite3"
-import mqtt from "mqtt";
+import mqtt from "mqtt"
+import fs from "node:fs"
+
+import { fileURLToPath } from 'url';
+import path from 'path';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const router = express.Router()
 
-const db = new sqlite3.Database("./data/main.db", sqlite3.OPEN_READWRITE | sqlite3.OPEN_CREATE, (err) => {
+const db = new sqlite3.Database(":memory:", sqlite3.OPEN_READWRITE | sqlite3.OPEN_CREATE, (err) => {
     if (err) console.error(err)
 })
-db.run(`CREATE TABLE IF NOT EXISTS trips(
+loadFromDisk(db).then(start)
+function start() {
+    db.exec(`
+  PRAGMA journal_mode = WAL;
+  PRAGMA synchronous = NORMAL;
+  PRAGMA temp_store = MEMORY;
+`);
+    db.run(`CREATE TABLE IF NOT EXISTS trips(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     gtfsId STRING,
     routeId STRING,
@@ -19,7 +33,7 @@ db.run(`CREATE TABLE IF NOT EXISTS trips(
     day STRING,
     direction INTEGER
 );`)
-db.run(`
+    db.run(`
     CREATE TABLE IF NOT EXISTS trip_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     trip_id TEXT NOT NULL,
@@ -33,7 +47,7 @@ db.run(`
     occupancy INTEGER,
     FOREIGN KEY (trip_id) REFERENCES trips(id)
 );`)
-db.run(`
+    db.run(`
     CREATE TABLE IF NOT EXISTS traffic_light_priorities (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     trip_id TEXT NOT NULL,
@@ -43,14 +57,14 @@ db.run(`
     responseAcknowledged BOOLEAN,
     FOREIGN KEY (trip_id) REFERENCES trips(id)
 );`)
-db.run(`
+    db.run(`
     CREATE TABLE IF NOT EXISTS stats (
     type TEXT NOT NULL,
     id TEXT,
     count INTEGER NOT NULL,
     UNIQUE (type, id)
 );`)
-db.run(`
+    db.run(`
     CREATE TABLE IF NOT EXISTS door_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     doorOpened BOOLEAN NOT NULL,
@@ -60,32 +74,43 @@ db.run(`
     FOREIGN KEY (trip_id) REFERENCES trips(id)
 );`)
 
-router.get("/stats/", async (req, res) => {
-    console.time("all stop events")
-    const events = await getAllStopTripEvents()
-    console.timeEnd("all stop events")
-    res.json(events)
-})
-router.get("/tl_events/", async (req, res) => {
-    console.time("all tl events")
-    const events = await getAllFromTable("traffic_light_priorities")
-    console.timeEnd("all tl events")
-    res.json(events)
-})
+    router.get("/stats/", async (req, res) => {
+        console.time("all stop events")
+        const events = await getAllStopTripEvents()
+        console.timeEnd("all stop events")
+        res.json(events)
+    })
+    router.get("/tl_events/", async (req, res) => {
+        console.time("all tl events")
+        const events = await getAllFromTable("traffic_light_priorities")
+        console.timeEnd("all tl events")
+        res.json(events)
+    })
 
-const client = mqtt.connect("wss://mqtt.hsl.fi:443")
+    const client = mqtt.connect("wss://mqtt.hsl.fi:443")
 
-client.on("connect", () => {
-    console.log("Connected to HSL MQTT")
-    client.subscribe("/hfp/v2/journey/+/#")
-})
-client.on("disconnect", () => {
-    console.log("Connection lost. Reconnecting")
-    client.reconnect()
+    client.on("connect", () => {
+        console.log("Connected to HSL MQTT")
+        client.subscribe("/hfp/v2/journey/+/#")
+    })
+    client.on("disconnect", () => {
+        console.log("Connection lost. Reconnecting")
+        client.reconnect()
+    }
+    )
+    client.on("message", handleMessage)
+
+    // back up when feeling like it
+    setInterval(() => {
+        backupToDisk(db).catch(console.error);
+    }, 30_000)
+
+    // also backup on exit
+    process.on('SIGINT', async () => {
+        await backupToDisk(memDb)
+        process.exit(0)
+    })
 }
-)
-client.on("message", handleMessage)
-
 async function handleMessage(topic, message) {
     const [_, prefix, version,
         journey_type, temporal_type, event_type,
@@ -119,7 +144,7 @@ async function handleMessage(topic, message) {
         sid
 
     } = messageData
-    //incrementStats("event", event_type)
+    incrementStats("event", event_type)
     switch (event_type) {
         case "ars":     // Vehicle has arrived to a stop
         case "pas":     // Vehicle passes through a stop without stopping
@@ -135,6 +160,10 @@ async function handleMessage(topic, message) {
         case "doc":     // Doors of the vehicle are closed
         case "tlr":     // Vehicle is requesting traffic light priority
         case "tla":     // Vehicle receives a response to traffic light priority request
+        case "due":     // Vehicle will soon arrive to a stop
+        case "wait":    // Vehicle is waiting at a stop
+        case "arr":     // Vehicle arrives inside of a stop radius
+        case "dep":     // Vehicle departs from a stop and leaves the stop radius
             const routeGtfsId = `HSL:${route}`
             const directionId = Number(dir) - 1
             const depTime = start && start.split(":").reduce((prev, curr) => +curr + (prev * 60)) * 60
@@ -185,10 +214,6 @@ async function handleMessage(topic, message) {
 
             break
         case "vp":      // Vehicle position
-        case "due":     // Vehicle will soon arrive to a stop
-        case "wait":    // Vehicle is waiting at a stop
-        case "arr":     // Vehicle arrives inside of a stop radius
-        case "dep":     // Vehicle departs from a stop and leaves the stop radius
         default:
             break
     }
@@ -220,6 +245,44 @@ export async function fuzzyTripId(routeId, direction, date, time) {
     if (!json.data || !json.data.fuzzyTrip || !json.data.fuzzyTrip.gtfsId) return null
     return json.data.fuzzyTrip.gtfsId
 }
+
+function loadFromDisk(memDb) {
+    return new Promise((resolve, reject) => {
+        if (!fs.existsSync(path.join(__dirname, 'data', 'main.db'))) {
+            console.warn("No db, creating one at "+ path.join(__dirname, 'data', 'main.db'))
+            return resolve() // first run, nothing to restore
+        }
+
+        const diskDb = new sqlite3.Database(path.join(__dirname, 'data', 'main.db'), sqlite3.OPEN_READONLY)
+
+        diskDb.backup(memDb, {
+            progress: (p) => {
+                console.log(`restoring ${p.remaining}/${p.total}`)
+            }
+        }, (err) => {
+            diskDb.close()
+            if (err) reject(err)
+            else resolve()
+        })
+    })
+}
+function backupToDisk(memDb) {
+    return new Promise((resolve, reject) => {
+        const diskDb = new sqlite3.Database(BACKUP_PATH)
+
+        memDb.backup(diskDb, {
+            progress: (p) => {
+                console.log(`backing up ${p.remaining}/${p.total}`)
+            }
+        }, (err) => {
+            diskDb.close()
+            if (err) reject(err)
+            else resolve()
+        })
+    })
+}
+
+
 export const operatorTable = {
     6: "Oy Pohjolan Liikenne Ab",
     12: "Koiviston Auto Oy",
